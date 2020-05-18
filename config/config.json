@@ -1,0 +1,31 @@
+{
+    "serve_ip": "0.0.0.0",
+    "serve_port": 30000,
+    "is_debug": false,
+    "etcd_cluster": {
+        "servers": [
+            {
+                "ip": "162.105.85.184",
+                "port": 2379
+            }
+        ]
+    },
+    "redis_cluster": {
+        "servers": [
+            {
+                "ip": "162.105.85.184",
+                "port": 6379
+            }
+        ]
+    },
+    "etcd_proxy": {
+        "workers_num": 20,
+        "dial_timeout": 5,
+        "resp_size": 4096
+    },
+    "redis_proxy": {
+        "workers_num": 20,
+        "dial_timeout": 5,
+        "resp_size": 4096
+    }
+}

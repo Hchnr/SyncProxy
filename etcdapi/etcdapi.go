@@ -5,25 +5,41 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/etcdserver/api/v3rpc/rpctypes"
+
+	"github.com/hchnr/etcd-proxy/config"
 )
 
-var etcdClient *clientv3.Client
+var etcdClients []*clientv3.Client
+var etcdClientsAvail chan *clientv3.Client
 
 func init() {
-	fmt.Println("init() in etcdapi here")
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   []string{"127.0.0.1:2379"},
-		DialTimeout: 5 * time.Second,
-	})
-	etcdClient = cli
-	if err != nil {
-		// handle error!
-		log.Fatalf("create etcd client error: %v", err)
+	wokersNum := config.LocalConfig.EtcdProxy.WorkkersNum
+	fmt.Printf("%d Etcd client initialized.\n", wokersNum)
+	etcdClients = make([]*clientv3.Client, wokersNum, wokersNum)
+	etcdClientsAvail = make(chan *clientv3.Client, wokersNum)
+
+	ip := config.LocalConfig.EtcdCluster.Servers[0].IP
+	port := strconv.FormatInt(int64(config.LocalConfig.EtcdCluster.Servers[0].Port), 10)
+	url := ip + ":" + port
+	dialTimeout := config.LocalConfig.EtcdProxy.DialTimeout
+	for i := 0; i < wokersNum; i++ {
+		cli, err := clientv3.New(clientv3.Config{
+			Endpoints:   []string{url},
+			DialTimeout: time.Duration(dialTimeout) * time.Second,
+		})
+		if err != nil {
+			// handle error!
+			log.Fatalf("create %d etcd client error: %v", i, err)
+		}
+		etcdClients[i] = cli
+		etcdClientsAvail <- cli
 	}
+	
 	// client closed after program exit
 	// defer cli.Close()
 }
@@ -31,7 +47,12 @@ func init() {
 func Put(key string, value string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
 	defer cancel()
+	// Get an available client from pool
+	etcdClient := <-etcdClientsAvail
+	
 	put_resp, err := etcdClient.Put(ctx, key, value)
+	// Return the available client to the pool after use it
+	etcdClientsAvail <- etcdClient
 	if err != nil {
 		if err == context.Canceled {
 			// ctx is canceled by another routine
@@ -47,7 +68,9 @@ func Put(key string, value string) []byte {
 			log.Fatalf("bad cluster endpoints, which are not etcd servers: %v", err)
 		}
 	}
-	fmt.Println("put_resp:", put_resp)
+	if config.LocalConfig.IsDebug {
+		fmt.Println("etcdapi.go put_resp:", put_resp)
+	}
 
 	resp := make([]byte, 32)
 	binary.BigEndian.PutUint64(resp, put_resp.Header.ClusterId)
@@ -60,7 +83,12 @@ func Put(key string, value string) []byte {
 func Get(key string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
 	defer cancel()
+	// Get an available client from pool
+	etcdClient := <-etcdClientsAvail
+
 	get_resp, err := etcdClient.Get(ctx, key)
+	// Return the available client to the pool after use it
+	etcdClientsAvail <- etcdClient	
 	if err != nil {
 		// with etcd clientv3 <= v3.3
 		if err == context.Canceled {
@@ -72,14 +100,21 @@ func Get(key string) string {
 		}
 	}
 	// use the response
-	fmt.Println("get_resp ==>", get_resp)
+	if config.LocalConfig.IsDebug {
+		fmt.Println("etcdapi.go get_resp ==>", get_resp)
+	}
 	return string(get_resp.Kvs[0].Value)
 }
 
 func GetSortedPrefix(key string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
 	defer cancel()
+	// Get an available client from pool
+	etcdClient := <-etcdClientsAvail
+
 	get_resp, err := etcdClient.Get(ctx, key, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
+	// Return the available client to the pool after use it
+	etcdClientsAvail <- etcdClient	
 	if err != nil {
 		// with etcd clientv3 <= v3.3
 		if err == context.Canceled {
@@ -96,7 +131,9 @@ func GetSortedPrefix(key string) []byte {
 		resp = append(resp, 0)
 		resp = append(resp, []byte(ev.Value)...)
 		resp = append(resp, 0)
-		fmt.Printf("get_resp prefix ==> %s : %s\n", ev.Key, ev.Value)
+		if config.LocalConfig.IsDebug {
+			fmt.Printf("etcdapi.go get_resp prefix ==> %s : %s\n", ev.Key, ev.Value)
+		}
 	}
 	return resp
 }
@@ -105,7 +142,12 @@ func GetSortedPrefix(key string) []byte {
 func GetWithRange(key string, end string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
 	defer cancel()
+	// Get an available client from pool
+	etcdClient := <-etcdClientsAvail
 	get_resp, err := etcdClient.Get(ctx, key, clientv3.WithRange(end), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
+
+	// Return the available client to the pool after use it
+	etcdClientsAvail <- etcdClient	
 	if err != nil {
 		// with etcd clientv3 <= v3.3
 		if err == context.Canceled {
@@ -122,7 +164,9 @@ func GetWithRange(key string, end string) []byte {
 		resp = append(resp, 0)
 		resp = append(resp, []byte(ev.Value)...)
 		resp = append(resp, 0)
-		fmt.Printf("get_resp range ==> %s : %s\n", ev.Key, ev.Value)
+		if config.LocalConfig.IsDebug {
+			fmt.Printf("etcdapi.go get_resp range ==> %s : %s\n", ev.Key, ev.Value)
+		}
 	}
 	return resp
 }
@@ -131,7 +175,12 @@ func GetWithRange(key string, end string) []byte {
 func GetWithLimit(key string, limit int64) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
 	defer cancel()
+	// Get an available client from pool
+	etcdClient := <-etcdClientsAvail
 	get_resp, err := etcdClient.Get(ctx, key, clientv3.WithPrefix(), clientv3.WithLimit(limit))
+
+	// Return the available client to the pool after use it
+	etcdClientsAvail <- etcdClient	
 	if err != nil {
 		// with etcd clientv3 <= v3.3
 		if err == context.Canceled {
@@ -148,18 +197,26 @@ func GetWithLimit(key string, limit int64) []byte {
 		resp = append(resp, 0)
 		resp = append(resp, []byte(ev.Value)...)
 		resp = append(resp, 0)
-		fmt.Printf("get_resp limit ==> %s : %s\n", ev.Key, ev.Value)
+		if config.LocalConfig.IsDebug {
+			fmt.Printf("etcdapi.go get_resp limit ==> %s : %s\n", ev.Key, ev.Value)
+		}
 	}
 	return resp
 }
 
+/* Watch the chagnes of the key, changes are sent to a channel. */
 func Watch(key string) chan []byte {
 	resps := make(chan []byte, 4096)
 	go func() {
+		// Get an available client from pool
+		etcdClient := <-etcdClientsAvail
 		ch := etcdClient.Watch(context.Background(), key)
+
 		for wresp := range ch {
 			for _, ev := range wresp.Events {
-				fmt.Printf("Watch() %s %q : %q\n", ev.Type, ev.Kv.Key, ev.Kv.Value)
+				if config.LocalConfig.IsDebug {
+					fmt.Printf("etcdapi.go Watch() %s %q : %q\n", ev.Type, ev.Kv.Key, ev.Kv.Value)
+				}
 				var resp []byte
 				if ev.Type == 0 {
 					resp = append(resp, 0)
@@ -175,6 +232,8 @@ func Watch(key string) chan []byte {
 				resps <- resp
 			}
 		}
+		// Return the available client to the pool after use it
+		etcdClientsAvail <- etcdClient	
 	} ()
 	return resps
 }
